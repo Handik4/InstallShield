@@ -191,12 +191,15 @@ def _statuses_agree(leaders_result: object, validator_result: dict) -> bool:
 
 
 class InstallShield(gl.Contract):
-    """Coordinator ledger for autonomous commercial installation escrow."""
+    """Installation coordinator with an isolated internal native-value vault."""
 
+    # Coordinator state owns installation lifecycle and consensus decisions.
     owner: Address
     next_install_id: u256
     installations: TreeMap[u256, Installation]
 
+    # Vault state owns every native-value accounting transition. Coordinator
+    # methods may move funds only through the private vault methods below.
     escrow_balance_atto: u256
     total_funded_atto: u256
     total_reclaimed_atto: u256
@@ -235,13 +238,71 @@ class InstallShield(gl.Contract):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Installation does not exist")
         return installation
 
-    @gl.public.write.payable
-    def __on_errored_message__(self) -> None:
-        """Restore a failed native payout to the recipient's claimable ledger."""
-        amount = int(gl.message.value)
+    def _vault_lock(self, amount: int) -> None:
+        """Lock newly received native value in the isolated vault ledger."""
+        self._assert_accounting()
+        funded = int(self.total_funded_atto) + amount
+        escrow = int(self.escrow_balance_atto) + amount
+        if funded > MAX_U256 or escrow > MAX_U256:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Vault balance overflow")
+        self.escrow_balance_atto = u256(escrow)
+        self.total_funded_atto = u256(funded)
+        self._assert_accounting()
+
+    def _vault_credit(
+        self, recipient: Address, amount: int, is_verified: bool
+    ) -> None:
+        """Move one installation lock to a recipient's pull-payment balance."""
+        self._assert_accounting()
+        escrow = int(self.escrow_balance_atto)
+        if amount <= 0 or amount > escrow:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Invalid vault release amount")
+
+        claimable = int(self.claimable_atto.get(recipient, u256(0))) + amount
+        total_claimable = int(self.total_claimable_atto) + amount
+        if claimable > MAX_U256 or total_claimable > MAX_U256:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Claimable balance overflow")
+
+        self.escrow_balance_atto = u256(escrow - amount)
+        self.claimable_atto[recipient] = u256(claimable)
+        self.total_claimable_atto = u256(total_claimable)
+        if is_verified:
+            self.total_verified_atto = u256(
+                int(self.total_verified_atto) + amount
+            )
+        else:
+            self.total_reclaimed_atto = u256(
+                int(self.total_reclaimed_atto) + amount
+            )
+        self._assert_accounting()
+
+    def _vault_prepare_payout(self, recipient: Address) -> int:
+        """Apply payout effects and return the amount for external transfer."""
+        self._assert_accounting()
+        amount = int(self.claimable_atto.get(recipient, u256(0)))
+        if amount <= 0:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} No claimable funds")
+
+        pending = int(self.pending_payout_atto.get(recipient, u256(0))) + amount
+        claimed = int(self.total_claimed_atto) + amount
+        if pending > MAX_U256 or claimed > MAX_U256:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Payout balance overflow")
+
+        self.claimable_atto[recipient] = u256(0)
+        self.total_claimable_atto = u256(
+            int(self.total_claimable_atto) - amount
+        )
+        self.total_claimed_atto = u256(claimed)
+        self.pending_payout_atto[recipient] = u256(pending)
+        self._assert_accounting()
+        return amount
+
+    def _vault_restore_failed_payout(
+        self, recipient: Address, amount: int
+    ) -> None:
+        """Restore a failed external transfer to the pull-payment balance."""
         if amount <= 0:
             return
-        recipient = gl.message.sender_address
         pending = int(self.pending_payout_atto.get(recipient, u256(0)))
         if amount > pending:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Unknown failed payout")
@@ -249,9 +310,20 @@ class InstallShield(gl.Contract):
         self.claimable_atto[recipient] = u256(
             int(self.claimable_atto.get(recipient, u256(0))) + amount
         )
-        self.total_claimable_atto = u256(int(self.total_claimable_atto) + amount)
-        self.total_claimed_atto = u256(int(self.total_claimed_atto) - amount)
+        self.total_claimable_atto = u256(
+            int(self.total_claimable_atto) + amount
+        )
+        self.total_claimed_atto = u256(
+            int(self.total_claimed_atto) - amount
+        )
         self._assert_accounting()
+
+    @gl.public.write.payable
+    def __on_errored_message__(self) -> None:
+        """Restore a failed native payout to the recipient's claimable ledger."""
+        amount = int(gl.message.value)
+        recipient = gl.message.sender_address
+        self._vault_restore_failed_payout(recipient, amount)
 
     @gl.public.write.payable
     def create_installation(
@@ -279,7 +351,6 @@ class InstallShield(gl.Contract):
         if deadline > MAX_U256:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Expiry overflow")
 
-        self._assert_accounting()
         install_id = int(self.next_install_id)
         self.installations[u256(install_id)] = Installation(
             install_id=u256(install_id),
@@ -298,9 +369,7 @@ class InstallShield(gl.Contract):
             payout_atto=u256(0),
         )
         self.next_install_id = u256(install_id + 1)
-        self.escrow_balance_atto = u256(int(self.escrow_balance_atto) + amount)
-        self.total_funded_atto = u256(int(self.total_funded_atto) + amount)
-        self._assert_accounting()
+        self._vault_lock(amount)
         return install_id
 
     @gl.public.write
@@ -367,26 +436,18 @@ class InstallShield(gl.Contract):
             self._assert_accounting()
             return decision
 
-        # Checks and effects complete before the claimable interaction. The
-        # installer must call claim_funds separately to initiate the transfer.
-        self.escrow_balance_atto = u256(
-            int(self.escrow_balance_atto) - locked_amount
-        )
-        self.total_verified_atto = u256(int(self.total_verified_atto) + locked_amount)
-        self.total_claimable_atto = u256(int(self.total_claimable_atto) + locked_amount)
-        self.claimable_atto[installer] = u256(
-            int(self.claimable_atto.get(installer, u256(0))) + locked_amount
-        )
+        # Coordinator effects precede the vault release. The separate claim
+        # method is the only path that performs an external interaction.
         installation.amount_atto = u256(0)
         installation.payout_atto = u256(locked_amount)
         installation.status = STATUS_VERIFIED
         installation.verified_at = u256(_now_ts())
-        self._assert_accounting()
+        self._vault_credit(installer, locked_amount, True)
         return decision
 
     @gl.public.write
     def reclaim_funds(self, install_id: int) -> None:
-        """Credit the client for an unresolved installation after expiry."""
+        """Credit the client after expiry without installer or LLM cooperation."""
         installation = self._installation(install_id)
         if gl.message.sender_address != installation.client:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Only the client may reclaim funds")
@@ -399,37 +460,22 @@ class InstallShield(gl.Contract):
         if amount <= 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Escrow amount is empty")
 
-        # CEI: consume the installation lock and update all ledgers before the
-        # client performs the separate claim_funds interaction.
+        # Deterministic expiry is the liveness path. Coordinator effects occur
+        # before the vault credit, and neither step performs an interaction.
+        client = Address(installation.client.as_hex)
         installation.amount_atto = u256(0)
         installation.status = STATUS_RECLAIMED
         installation.reclaimed_at = u256(_now_ts())
         installation.reason = "Installation expired before verification"
-        self.escrow_balance_atto = u256(int(self.escrow_balance_atto) - amount)
-        self.total_reclaimed_atto = u256(int(self.total_reclaimed_atto) + amount)
-        self.total_claimable_atto = u256(int(self.total_claimable_atto) + amount)
-        self.claimable_atto[installation.client] = u256(
-            int(self.claimable_atto.get(installation.client, u256(0))) + amount
-        )
-        self._assert_accounting()
+        self._vault_credit(client, amount, False)
 
     @gl.public.write
     def claim_funds(self) -> None:
         """Send the caller's verified payout or expiry refund with rollback."""
         recipient = gl.message.sender_address
-        amount = int(self.claimable_atto.get(recipient, u256(0)))
-        if amount <= 0:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} No claimable funds")
-
-        # Effects precede the external interaction. The error hook restores
-        # the same amount if the finalized native transfer cannot be delivered.
-        self.claimable_atto[recipient] = u256(0)
-        self.total_claimable_atto = u256(int(self.total_claimable_atto) - amount)
-        self.total_claimed_atto = u256(int(self.total_claimed_atto) + amount)
-        self.pending_payout_atto[recipient] = u256(
-            int(self.pending_payout_atto.get(recipient, u256(0))) + amount
-        )
-        self._assert_accounting()
+        # CEI: the vault consumes claimable state before this sole external
+        # interaction. The error hook reverses those effects on failed delivery.
+        amount = self._vault_prepare_payout(recipient)
         _NativeRecipient(recipient).emit_transfer(value=u256(amount))
 
     @gl.public.view
