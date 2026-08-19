@@ -4,6 +4,31 @@
 
 ---
 
+## Network Deployment
+
+> **Live on the GenLayer testnet.** The InstallShield Intelligent Contract is
+> deployed and verifiable on the GenLayer network.
+
+| Field | Value |
+|---|---|
+| **Network** | GenLayer Testnet |
+| **Contract Address** | `0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667` |
+| **Explorer** | [View on GenLayer Explorer](https://explorer-studio.genlayer.com/address/0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667) |
+| **Status** | Deployed / Live |
+
+Inspect the live contract, its state, and transaction history on the GenLayer
+explorer:
+**https://explorer-studio.genlayer.com/address/0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667**
+
+To point the frontend at this deployment, set the address in `app/.env.example`
+(copy it to `app/.env`):
+
+```bash
+VITE_INSTALL_SHIELD_ADDRESS=0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667
+```
+
+---
+
 ## 1. Executive Summary
 
 **InstallShield** is a GenLayer Intelligent Contract that settles payment disputes
