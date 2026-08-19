@@ -1,0 +1,9 @@
+app/node_modules/
+app/dist/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.DS_Store
