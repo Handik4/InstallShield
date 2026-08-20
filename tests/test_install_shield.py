@@ -165,6 +165,116 @@ def test_leader_and_validator_must_agree_on_status(
     assert direct_vm.run_validator() is False
 
 
+def test_verification_prompt_demands_authenticated_device_diagnostics(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = deploy_at(direct_vm, direct_deploy)
+    install_id = fund_installation(
+        direct_vm,
+        contract,
+        direct_alice,
+        direct_bob,
+        timestamp(BASE_TIME) + 3600,
+    )
+    prompts = []
+    original_match = direct_vm._match_llm_mock
+
+    def capture_prompt(prompt: str):
+        prompts.append(prompt)
+        return original_match(prompt)
+
+    direct_vm._match_llm_mock = capture_prompt
+    mock_verdict(direct_vm, "PASS")
+    direct_vm.sender = direct_bob
+    direct_vm.value = 0
+    contract.verify_installation(
+        install_id, "NVR channels 1-8 online; cameras report 5MP; health API status OK"
+    )
+
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    # The trust model must force the auditor to reject generic prose and only
+    # accept hardware-specific, authenticated device diagnostics.
+    assert "AUTHENTICATED DEVICE DIAGNOSTICS" in prompt
+    assert "SERIAL NUMBER" in prompt
+    assert "MAC ADDRESS" in prompt
+    assert "ACTIVE STREAM STATUS" in prompt
+    assert "Dahua" in prompt and "Hikvision" in prompt
+
+
+def test_verification_attempts_are_capped_to_prevent_grinding(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = deploy_at(direct_vm, direct_deploy)
+    install_id = fund_installation(
+        direct_vm,
+        contract,
+        direct_alice,
+        direct_bob,
+        timestamp(BASE_TIME) + 3600,
+    )
+    # Each rejected submission keeps the installation non-terminal, which is the
+    # grinding vector: an installer could resubmit until the nondeterministic
+    # auditor eventually returns PASS. The MAX_ATTEMPTS cap closes that door.
+    mock_verdict(direct_vm, "FAIL")
+    direct_vm.sender = direct_bob
+    direct_vm.value = 0
+
+    for expected_attempt in range(1, 4):
+        assert contract.verify_installation(install_id, "Generic prose evidence") == "FAIL"
+        installation = contract.get_installation(install_id)
+        assert installation["status"] == "REJECTED"
+        assert installation["verification_attempts"] == expected_attempt
+        assert installation["attempts_remaining"] == 3 - expected_attempt
+
+    # The fourth submission must revert before any LLM work runs, and the escrow
+    # must remain intact and reclaimable by the client.
+    with direct_vm.expect_revert("Verification attempt limit"):
+        contract.verify_installation(install_id, "One more roll of the dice")
+
+    installation = contract.get_installation(install_id)
+    assert installation["verification_attempts"] == 3
+    assert installation["amount_atto"] == str(ONE_GEN)
+    assert contract.get_accounting()["escrow_balance_atto"] == str(ONE_GEN)
+    assert contract.get_accounting()["accounting_invariant"] is True
+
+
+def test_attempt_cap_still_allows_a_passing_verification(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = deploy_at(direct_vm, direct_deploy)
+    install_id = fund_installation(
+        direct_vm,
+        contract,
+        direct_alice,
+        direct_bob,
+        timestamp(BASE_TIME) + 3600,
+    )
+    # Two rejected attempts, then a PASS on the third (final) allowed attempt
+    # must still release the funds -- the cap gates grinding, not legitimate use.
+    mock_verdict(direct_vm, "FAIL")
+    direct_vm.sender = direct_bob
+    direct_vm.value = 0
+    assert contract.verify_installation(install_id, "Generic prose one") == "FAIL"
+    assert contract.verify_installation(install_id, "Generic prose two") == "FAIL"
+
+    direct_vm.clear_mocks()
+    mock_verdict(direct_vm, "PASS")
+    assert (
+        contract.verify_installation(
+            install_id,
+            "Hikvision NVR serial DS-7608, MAC AA:BB:CC:DD:EE:FF, channels 1-8 streaming",
+        )
+        == "PASS"
+    )
+
+    installation = contract.get_installation(install_id)
+    assert installation["status"] == "VERIFIED"
+    assert installation["verification_attempts"] == 3
+    assert contract.get_claimable(address_hex(direct_bob)) == str(ONE_GEN)
+    assert contract.get_accounting()["accounting_invariant"] is True
+
+
 def test_low_confidence_pass_is_normalized_to_rejected(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):

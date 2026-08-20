@@ -21,7 +21,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { createClient } from "genlayer-js";
-import { localnet } from "genlayer-js/chains";
+import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
 
 type Eip1193Provider = {
@@ -72,7 +72,7 @@ const DEFAULT_SLA =
 const DEFAULT_DIAGNOSTICS =
   "NVR channels 1-8 online; cameras report 5MP; health API status OK";
 
-const readClient = createClient({ chain: localnet });
+const readClient = createClient({ chain: studionet });
 
 function isValidContractAddress(address: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(address) && address !== ZERO_ADDRESS;
@@ -143,12 +143,15 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState(DEFAULT_DIAGNOSTICS);
   const [busyAction, setBusyAction] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
+  // Per-account claimable balance for the connected wallet. This gates the
+  // payout button and is distinct from the global ledger total below.
+  const [claimable, setClaimable] = useState("0");
 
   const contractReady = isValidContractAddress(CONTRACT_ADDRESS);
   const canWrite = contractReady && Boolean(walletAddress && walletProvider);
   const writeClient = canWrite
     ? createClient({
-        chain: localnet,
+        chain: studionet,
         account: walletAddress as `0x${string}`,
         provider: walletProvider,
       })
@@ -165,6 +168,25 @@ export default function App() {
       setAccounting(asAccounting(result));
     } catch (error) {
       setNotice({ tone: "bad", message: errorMessage(error, "Ledger read failed") });
+    }
+  }
+
+  async function refreshClaimable(address = walletAddress) {
+    // Read the connected account's own claimable balance via get_claimable so
+    // the payout button reflects this wallet's funds, never the global ledger.
+    if (!contractReady || !isValidContractAddress(address)) {
+      setClaimable("0");
+      return;
+    }
+    try {
+      const result = await readClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        functionName: "get_claimable",
+        args: [address],
+      });
+      setClaimable(String(result ?? "0"));
+    } catch {
+      setClaimable("0");
     }
   }
 
@@ -199,6 +221,12 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [contractReady]);
 
+  useEffect(() => {
+    void refreshClaimable();
+    const interval = window.setInterval(() => void refreshClaimable(), 12_000);
+    return () => window.clearInterval(interval);
+  }, [contractReady, walletAddress]);
+
   async function connectWallet() {
     const provider = (window as Window & { ethereum?: Eip1193Provider }).ethereum;
     if (!provider) {
@@ -214,15 +242,16 @@ export default function App() {
       const account = accounts[0] ?? "";
       if (!account) throw new Error("Wallet returned no account");
       const client = createClient({
-        chain: localnet,
+        chain: studionet,
         account: account as `0x${string}`,
         provider,
       });
-      await client.connect("localnet");
+      await client.connect("studionet");
       setWalletProvider(provider);
       setWalletAddress(account);
       setInstaller((value) => value || account);
-      setNotice({ tone: "good", message: "Wallet connected to GenLayer localnet" });
+      await refreshClaimable(account);
+      setNotice({ tone: "good", message: "Wallet connected to GenLayer StudioNet" });
     } catch (error) {
       setWalletError(errorMessage(error, "Wallet connection failed"));
     } finally {
@@ -242,7 +271,7 @@ export default function App() {
     }
     setBusyAction(action);
     try {
-      await writeClient.connect("localnet");
+      await writeClient.connect("studionet");
       const hash = await writeClient.writeContract({
         address: CONTRACT_ADDRESS as `0x${string}`,
         functionName,
@@ -253,8 +282,9 @@ export default function App() {
         hash,
         status: TransactionStatus.ACCEPTED,
       });
-      setNotice({ tone: "good", message: `${action} accepted on localnet` });
+      setNotice({ tone: "good", message: `${action} accepted on studionet` });
       await refreshAccounting();
+      await refreshClaimable();
       return hash;
     } catch (error) {
       setNotice({ tone: "bad", message: errorMessage(error, `${action} failed`) });
@@ -315,12 +345,22 @@ export default function App() {
 
   async function claimFunds() {
     const hash = await submitTransaction("Payout claim", "claim_funds", []);
-    if (hash) await refreshAccounting();
+    if (hash) {
+      await refreshAccounting();
+      await refreshClaimable();
+    }
   }
 
   const isLoading = Boolean(busyAction);
   const status = installation?.status ?? "NO RECORD";
-  const claimable = accounting?.total_claimable_atto ?? "0";
+  const totalClaimable = accounting?.total_claimable_atto ?? "0";
+  const hasClaimable = (() => {
+    try {
+      return BigInt(claimable) > 0n;
+    } catch {
+      return false;
+    }
+  })();
 
   return (
     <div className="app-shell">
@@ -330,7 +370,7 @@ export default function App() {
           <span>installshield</span>
         </a>
         <div className="topbar-meta">
-          <span className="network-status"><span className="status-dot" /> localnet</span>
+          <span className="network-status"><span className="status-dot" /> studionet</span>
           <span className="contract-address" title={CONTRACT_ADDRESS || "Contract address not configured"}>
             <Link2 size={14} /> {contractReady ? shortAddress(CONTRACT_ADDRESS) : "address needed"}
           </span>
@@ -370,7 +410,7 @@ export default function App() {
             </span>
           </div>
           <Metric icon={<LockKeyhole size={17} />} label="Locked in escrow" value={`${formatAtto(accounting?.escrow_balance_atto)} GEN`} accent="mint" />
-          <Metric icon={<CircleDollarSign size={17} />} label="Claimable" value={`${formatAtto(claimable)} GEN`} accent="gold" />
+          <Metric icon={<CircleDollarSign size={17} />} label="Claimable" value={`${formatAtto(totalClaimable)} GEN`} accent="gold" />
           <Metric icon={<BadgeCheck size={17} />} label="Verified volume" value={`${formatAtto(accounting?.total_verified_atto)} GEN`} accent="blue" />
           <Metric icon={<RefreshCw size={17} />} label="Reclaimed volume" value={`${formatAtto(accounting?.total_reclaimed_atto)} GEN`} accent="coral" />
         </section>
@@ -473,7 +513,7 @@ export default function App() {
                   {busyAction === "Expiry reclaim" ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
                   Reclaim after expiry
                 </button>
-                <button className="secondary-button dark" type="button" onClick={() => void claimFunds()} disabled={!canWrite || isLoading || claimable === "0"}>
+                <button className="secondary-button dark" type="button" onClick={() => void claimFunds()} disabled={!canWrite || isLoading || !hasClaimable}>
                   {busyAction === "Payout claim" ? <LoaderCircle className="spin" size={17} /> : <CircleDollarSign size={17} />}
                   Claim {formatAtto(claimable)} GEN
                 </button>
@@ -485,7 +525,7 @@ export default function App() {
       </main>
       <footer className="footer-line">
         <span>INSTALLSHIELD / COMMERCIAL HARDWARE ESCROW</span>
-        <span>GENLAYER LOCALNET <span className="status-dot" /></span>
+        <span>GENLAYER STUDIONET <span className="status-dot" /></span>
       </footer>
     </div>
   );

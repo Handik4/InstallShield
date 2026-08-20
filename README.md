@@ -6,25 +6,25 @@
 
 ## Network Deployment
 
-> **Live on the GenLayer testnet.** The InstallShield Intelligent Contract is
+> **Live on GenLayer StudioNet.** The InstallShield Intelligent Contract is
 > deployed and verifiable on the GenLayer network.
 
 | Field | Value |
 |---|---|
-| **Network** | GenLayer Testnet |
-| **Contract Address** | `0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667` |
-| **Explorer** | [View on GenLayer Explorer](https://explorer-studio.genlayer.com/address/0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667) |
+| **Network** | GenLayer StudioNet |
+| **Contract Address** | `0xAfd506cbBFeb9F64d18233F448693b3812BBfD41` |
+| **Explorer** | [View on GenLayer Explorer](https://genlayer-explorer.vercel.app/contracts/0xAfd506cbBFeb9F64d18233F448693b3812BBfD41) |
 | **Status** | Deployed / Live |
 
 Inspect the live contract, its state, and transaction history on the GenLayer
 explorer:
-**https://explorer-studio.genlayer.com/address/0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667**
+**https://genlayer-explorer.vercel.app/contracts/0xAfd506cbBFeb9F64d18233F448693b3812BBfD41**
 
 To point the frontend at this deployment, set the address in `app/.env.example`
 (copy it to `app/.env`):
 
 ```bash
-VITE_INSTALL_SHIELD_ADDRESS=0x6EBEfd2BB45Fa2D9077e6E34484224f0b8738667
+VITE_INSTALL_SHIELD_ADDRESS=0xAfd506cbBFeb9F64d18233F448693b3812BBfD41
 ```
 
 ---
